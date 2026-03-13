@@ -1,165 +1,148 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import text
+import sqlite3
+from io import BytesIO
 from datetime import datetime
-import plotly.express as px
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="KS CLOTHING - SISTEMA INTEGRAL", layout="wide")
-
-# --- VARIABLES FIJAS (Para evitar errores de base de datos) ---
+# --- CONFIGURACIÓN ---
 NOMBRES_TIENDAS = ["Tienda Central", "Tienda Norte", "Tienda Sur", "Tienda Este", "Tienda Oeste"]
-TALLAS = ["S", "M", "L", "XL", "XXL"]
-CATEGORIAS = ["Hoodies", "Polos", "Pantalones", "Gorras", "Accesorios"]
+TALLAS = ["S", "M", "L", "XL"]
 
-# --- CONEXIÓN PERMANENTE ---
-conn = st.connection("postgresql", type="sql")
+# --- BASE DE DATOS ---
+# Usamos una ruta simple para la nube
+def get_connection():
+    return sqlite3.connect('ks_database.db', check_same_thread=False)
 
-def inicializar_db():
-    """Crea las tablas de datos si no existen."""
-    try:
-        with conn.session as s:
-            s.execute(text('CREATE TABLE IF NOT EXISTS ingresos (id SERIAL PRIMARY KEY, producto TEXT, categoria TEXT, talla TEXT, cantidad INTEGER, fecha DATE)'))
-            s.execute(text('CREATE TABLE IF NOT EXISTS distribucion (id SERIAL PRIMARY KEY, producto TEXT, talla TEXT, cantidad INTEGER, tienda TEXT, fecha DATE)'))
-            s.execute(text('CREATE TABLE IF NOT EXISTS ventas (id SERIAL PRIMARY KEY, tienda TEXT, producto TEXT, categoria TEXT, talla TEXT, cantidad INTEGER, precio FLOAT, fecha DATE)'))
-            s.commit()
-    except:
-        pass
+def crear_tablas():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('CREATE TABLE IF NOT EXISTS ingresos (id INTEGER PRIMARY KEY, producto TEXT, talla TEXT, cantidad INTEGER, fecha DATE)')
+    c.execute('CREATE TABLE IF NOT EXISTS distribucion (id INTEGER PRIMARY KEY, producto TEXT, talla TEXT, cantidad INTEGER, tienda TEXT, fecha DATE)')
+    c.execute('CREATE TABLE IF NOT EXISTS ventas_tiendas (id INTEGER PRIMARY KEY, producto TEXT, talla TEXT, cantidad INTEGER, tienda TEXT, fecha DATE)')
+    c.execute('CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY, tienda TEXT, pedido_texto TEXT, foto BLOB, fecha DATETIME)')
+    conn.commit()
+    conn.close()
 
-inicializar_db()
+crear_tablas()
 
-# --- FUNCIONES DE LECTURA SEGURA ---
-def leer_datos(query):
-    try:
-        return conn.query(query, ttl=0)
-    except:
-        return pd.DataFrame()
-
-def obtener_stock_almacen():
-    df_in = leer_datos('SELECT producto, talla, SUM(cantidad) as t_in FROM ingresos GROUP BY producto, talla')
-    df_out = leer_datos('SELECT producto, talla, SUM(cantidad) as t_out FROM distribucion GROUP BY producto, talla')
+# --- FUNCIONES DE CÁLCULO ---
+def obtener_stock_real():
+    conn = get_connection()
+    ingresos = pd.read_sql('SELECT producto, talla, SUM(cantidad) as total_in FROM ingresos GROUP BY producto, talla', conn)
+    salidas = pd.read_sql('SELECT producto, talla, SUM(cantidad) as total_out FROM distribucion GROUP BY producto, talla', conn)
+    conn.close()
     
-    if df_in.empty:
-        return pd.DataFrame(columns=['producto', 'talla', 'Disponible'])
+    if ingresos.empty:
+        return pd.DataFrame(columns=['producto', 'talla', 'stock_disponible'])
     
-    df = pd.merge(df_in, df_out, on=['producto', 'talla'], how='left').fillna(0)
-    df['Disponible'] = df['t_in'] - df['t_out']
-    return df[df['Disponible'] > 0]
+    df = pd.merge(ingresos, salidas, on=['producto', 'talla'], how='left').fillna(0)
+    df['stock_disponible'] = df['total_in'] - df['total_out']
+    return df[df['stock_disponible'] > 0]
 
-# --- CONTROL DE ACCESO ---
-if 'logueado' not in st.session_state:
-    st.session_state.logueado = False
+# --- INTERFAZ ---
+st.set_page_config(page_title="KS - Sistema Web", layout="wide")
 
-if not st.session_state.logueado:
-    st.title("🔐 Acceso KS CLOTHING")
-    col1, col2 = st.columns(2)
-    with col1:
-        pin = st.text_input("Ingrese PIN de Seguridad", type="password")
-        if st.button("Entrar al Sistema"):
-            if pin == "2026":
-                st.session_state.logueado = True
-                st.session_state.rol = "Administrador"
-                st.rerun()
-            elif pin == "1234":
-                st.session_state.logueado = True
-                st.session_state.rol = "Tienda"
-                st.rerun()
-            else:
-                st.error("PIN Incorrecto")
-else:
-    # --- MENÚ PRINCIPAL ---
-    st.sidebar.title(f"👤 {st.session_state.rol}")
-    
-    if st.session_state.rol == "Administrador":
-        menu = ["📊 Dashboard", "📥 Almacén Central", "🚚 Enviar a Tiendas", "💰 Registrar Venta", "📜 Historial General", "⚙️ Ajustes"]
-    else:
-        menu = ["💰 Registrar Venta", "📊 Mi Stock"]
-        
-    choice = st.sidebar.radio("Navegación", menu)
+if 'rol' not in st.session_state:
+    st.session_state['rol'] = None
 
-    # --- PÁGINA: DASHBOARD ---
-    if choice == "📊 Dashboard":
-        st.header("📊 Panel de Control General")
-        df_stock = obtener_stock_almacen()
-        
-        c1, c2, c3 = st.columns(3)
-        with c1: st.metric("Prendas en Almacén", int(df_stock['Disponible'].sum()) if not df_stock.empty else 0)
-        
-        df_v = leer_datos("SELECT SUM(precio) as total FROM ventas")
-        total_v = df_v['total'].iloc[0] if not df_v.empty and df_v['total'].iloc[0] is not None else 0
-        with c2: st.metric("Ventas Totales", f"S/. {total_v:.2f}")
-        
-        if not df_stock.empty:
-            fig = px.bar(df_stock, x="producto", y="Disponible", color="talla", title="Stock por Modelo y Talla")
-            st.plotly_chart(fig, use_container_width=True)
-
-    # --- PÁGINA: ALMACÉN ---
-    elif choice == "📥 Almacén Central":
-        st.header("📥 Ingreso de Mercadería")
-        with st.form("form_ingreso", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                p = st.text_input("Nombre del Producto").upper()
-                cat = st.selectbox("Categoría", CATEGORIAS)
-            with col2:
-                t = st.selectbox("Talla", TALLAS)
-                can = st.number_input("Cantidad", min_value=1)
-            
-            if st.form_submit_button("Confirmar Ingreso"):
-                with conn.session as s:
-                    s.execute(text("INSERT INTO ingresos (producto, categoria, talla, cantidad, fecha) VALUES (:p, :cat, :t, :can, :f)"),
-                              {"p":p, "cat":cat, "t":t, "can":can, "f":datetime.now().date()})
-                    s.commit()
-                st.success(f"Registrado: {can} unidades de {p}")
-
-    # --- PÁGINA: DISTRIBUCIÓN ---
-    elif choice == "🚚 Enviar a Tiendas":
-        st.header("🚚 Distribución a Sucursales")
-        df_s = obtener_stock_almacen()
-        if df_s.empty:
-            st.warning("No hay stock en almacén.")
+if st.session_state['rol'] is None:
+    st.title("🔐 Acceso Sistema KS")
+    pin = st.text_input("PIN de Acceso", type="password")
+    if st.button("Ingresar"):
+        if pin == "2026":
+            st.session_state['rol'] = "admin"
+            st.rerun()
+        elif pin == "1234":
+            st.session_state['rol'] = "tienda"
+            st.rerun()
         else:
-            with st.form("form_dist"):
-                prod_sel = st.selectbox("Producto", df_s['producto'].unique())
-                talla_sel = st.selectbox("Talla", TALLAS)
+            st.error("PIN Incorrecto")
+else:
+    # MENÚ LATERAL
+    if st.session_state['rol'] == "admin":
+        st.sidebar.success("💻 ADMINISTRADOR")
+        menu = ["📥 Ingreso Almacén", "🚚 Enviar a Tiendas", "📊 Inventario Real", "📦 Pedidos Recibidos"]
+    else:
+        st.sidebar.info("🏪 TIENDA")
+        menu = ["🛒 Registrar Venta", "📝 Hacer Pedido"]
+    
+    choice = st.sidebar.selectbox("Seleccione:", menu)
+
+    # --- LÓGICA DE OPCIONES ---
+    
+    if choice == "📥 Ingreso Almacén":
+        st.subheader("Entrada de Mercadería")
+        with st.form("form_in", clear_on_submit=True):
+            p = st.text_input("Producto").upper()
+            t = st.selectbox("Talla", TALLAS)
+            c_in = st.number_input("Cantidad", min_value=1, step=1)
+            if st.form_submit_button("Guardar Ingreso"):
+                conn = get_connection()
+                conn.execute('INSERT INTO ingresos (producto, talla, cantidad, fecha) VALUES (?,?,?,?)', 
+                             (p, t, c_in, datetime.now().date()))
+                conn.commit()
+                conn.close()
+                st.success(f"Registrado: {p} Talla {t}")
+
+    elif choice == "🚚 Enviar a Tiendas":
+        st.subheader("Distribuir a Tiendas")
+        df_stock = obtener_stock_real()
+        if not df_stock.empty:
+            with st.form("form_out", clear_on_submit=True):
+                prod_sel = st.selectbox("Producto disponible", df_stock['producto'].unique())
+                talla_sel = st.selectbox("Talla", df_stock[df_stock['producto']==prod_sel]['talla'])
                 tienda_dest = st.selectbox("Tienda Destino", NOMBRES_TIENDAS)
-                cant_env = st.number_input("Cantidad", min_value=1)
-                
-                if st.form_submit_button("Enviar Mercadería"):
-                    with conn.session as s:
-                        s.execute(text("INSERT INTO distribucion (producto, talla, cantidad, tienda, fecha) VALUES (:p, :t, :c, :ti, :f)"),
-                                  {"p":prod_sel, "t":talla_sel, "c":cant_env, "ti":tienda_dest, "f":datetime.now().date()})
-                        s.commit()
-                    st.success("Envío registrado correctamente.")
+                cant_env = st.number_input("Cantidad a enviar", min_value=1, step=1)
+                if st.form_submit_button("Confirmar Envío"):
+                    conn = get_connection()
+                    conn.execute('INSERT INTO distribucion (producto, talla, cantidad, tienda, fecha) VALUES (?,?,?,?,?)',
+                                 (prod_sel, talla_sel, cant_env, tienda_dest, datetime.now().date()))
+                    conn.commit()
+                    conn.close()
+                    st.success("Envío registrado")
+                    st.rerun()
+        else:
+            st.warning("No hay productos en stock para enviar.")
 
-    # --- PÁGINA: VENTAS ---
-    elif choice == "💰 Registrar Venta":
-        st.header("💰 Registro de Venta Diaria")
-        with st.form("form_ventas", clear_on_submit=True):
-            tienda_v = st.selectbox("Tienda", NOMBRES_TIENDAS)
-            prod_v = st.text_input("Producto").upper()
-            col1, col2 = st.columns(2)
-            with col1:
-                talla_v = st.selectbox("Talla", TALLAS)
-                cant_v = st.number_input("Cantidad", min_value=1)
-            with col2:
-                precio_v = st.number_input("Precio Total de Venta (S/.)", min_value=0.0)
-            
-            if st.form_submit_button("Guardar Venta"):
-                with conn.session as s:
-                    s.execute(text("INSERT INTO ventas (tienda, producto, talla, cantidad, precio, fecha) VALUES (:ti, :p, :t, :c, :pr, :f)"),
-                              {"ti":tienda_v, "p":prod_v, "t":talla_v, "c":cant_v, "pr":precio_v, "f":datetime.now().date()})
-                    s.commit()
-                st.success("Venta guardada.")
+    elif choice == "📊 Inventario Real":
+        st.subheader("Estado Actual del Almacén (Lo que te queda)")
+        df_resumen = obtener_stock_real()
+        if not df_resumen.empty:
+            st.dataframe(df_resumen, use_container_width=True)
+        else:
+            st.info("El inventario está vacío.")
 
-    # --- PÁGINA: HISTORIAL ---
-    elif choice == "📜 Historial General":
-        st.header("📜 Movimientos Registrados")
-        t1, t2, t3 = st.tabs(["📥 Ingresos", "🚚 Envíos", "💰 Ventas"])
-        with t1: st.dataframe(leer_datos("SELECT * FROM ingresos ORDER BY fecha DESC"), use_container_width=True)
-        with t2: st.dataframe(leer_datos("SELECT * FROM distribucion ORDER BY fecha DESC"), use_container_width=True)
-        with t3: st.dataframe(leer_datos("SELECT * FROM ventas ORDER BY fecha DESC"), use_container_width=True)
+    elif choice == "📝 Hacer Pedido":
+        st.subheader("Enviar Pedido al Almacén")
+        with st.form("form_ped", clear_on_submit=True):
+            tienda_org = st.selectbox("Tu Tienda", NOMBRES_TIENDAS)
+            lista_txt = st.text_area("Escribe tu pedido aquí...")
+            foto = st.file_uploader("O sube una foto", type=['jpg','png','jpeg'])
+            if st.form_submit_button("Enviar Pedido"):
+                foto_bytes = foto.read() if foto else None
+                conn = get_connection()
+                conn.execute('INSERT INTO pedidos (tienda, pedido_texto, foto, fecha) VALUES (?,?,?,?)',
+                             (tienda_org, lista_txt, foto_bytes, datetime.now()))
+                conn.commit()
+                conn.close()
+                st.success("🚀 Pedido enviado con éxito")
 
-    if st.sidebar.button("🚪 Cerrar Sesión"):
-        st.session_state.logueado = False
+    elif choice == "📦 Pedidos Recibidos":
+        st.subheader("Pedidos de las Tiendas")
+        conn = get_connection()
+        pedidos = pd.read_sql('SELECT * FROM pedidos ORDER BY fecha DESC', conn)
+        conn.close()
+        for i, r in pedidos.iterrows():
+            with st.expander(f"De: {r['tienda']} - {r['fecha']}"):
+                st.write(r['pedido_texto'])
+                if r['foto']: st.image(r['foto'])
+                if st.button(f"Atendido (Borrar {r['id']})"):
+                    conn = get_connection()
+                    conn.execute('DELETE FROM pedidos WHERE id=?', (r['id'],))
+                    conn.commit()
+                    conn.close()
+                    st.rerun()
+
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state['rol'] = None
         st.rerun()
