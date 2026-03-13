@@ -123,4 +123,5 @@ else:
     # --- BOTÓN DE CIERRE ---
     if st.sidebar.button("Cerrar Sesión"):
         st.session_state['rol'] = None
-        st.rerun()v
+        st.rerun()
+
