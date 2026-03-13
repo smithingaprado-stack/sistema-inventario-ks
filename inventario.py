@@ -5,12 +5,11 @@ from io import BytesIO
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
-# PIN para el Almacén: 2026 / PIN para Tiendas: 1234
 NOMBRES_TIENDAS = ["Tienda Central", "Tienda Norte", "Tienda Sur", "Tienda Este", "Tienda Oeste"]
 TALLAS = ["S", "M", "L", "XL"]
 
-# --- BASE DE DATOS ---
-conn = sqlite3.connect('ks_sistema_final.db', check_same_thread=False)
+# --- BASE DE DATOS (Ruta compatible con la nube) ---
+conn = sqlite3.connect('ks_data.db', check_same_thread=False)
 c = conn.cursor()
 
 def crear_tablas():
@@ -22,8 +21,17 @@ def crear_tablas():
 
 crear_tablas()
 
+# --- FUNCIONES DE APOYO ---
+def obtener_stock_total():
+    ingresos = pd.read_sql('SELECT producto, talla, SUM(cantidad) as total_in FROM ingresos GROUP BY producto, talla', conn)
+    salidas = pd.read_sql('SELECT producto, talla, SUM(cantidad) as total_out FROM distribucion GROUP BY producto, talla', conn)
+    if ingresos.empty: return pd.DataFrame(columns=['producto', 'talla', 'stock_disponible'])
+    df = pd.merge(ingresos, salidas, on=['producto', 'talla'], how='left').fillna(0)
+    df['stock_disponible'] = df['total_in'] - df['total_out']
+    return df
+
 # --- INTERFAZ ---
-st.set_page_config(page_title="Sistema KS - Control Total", layout="wide")
+st.set_page_config(page_title="Sistema KS - Web", layout="wide")
 
 if 'rol' not in st.session_state:
     st.session_state['rol'] = None
@@ -41,65 +49,56 @@ if st.session_state['rol'] is None:
         else:
             st.error("PIN Incorrecto")
 else:
-    # --- MENÚ SEGÚN ROL ---
+    # --- MENÚ ---
     if st.session_state['rol'] == "admin":
-        st.sidebar.success("💻 Modo: ADMINISTRADOR")
-        menu = ["📊 Dashboard Global", "📥 Ingreso Almacén", "🚚 Envío a Tiendas", "📝 Ver Pedidos Recibidos"]
+        st.sidebar.success("💻 ADMINISTRADOR")
+        menu = ["📥 Ingreso Almacén", "🚚 Envío a Tiendas", "📊 Inventario Real", "📦 Pedidos Recibidos"]
     else:
-        st.sidebar.info("🏪 Modo: TIENDA")
-        menu = ["🛒 Registrar Venta Diaria", "📝 Hacer Pedido al Almacén"]
+        st.sidebar.info("🏪 TIENDA")
+        menu = ["🛒 Registrar Venta", "📝 Hacer Pedido"]
     
     choice = st.sidebar.selectbox("Seleccione opción:", menu)
 
-    # --- LÓGICA DE TIENDA (BLOQUEADA) ---
-    if choice == "🛒 Registrar Venta Diaria":
-        st.header("🛒 Registrar Venta de la Tienda")
-        with st.form("venta"):
-            tienda_vende = st.selectbox("¿Qué tienda eres?", NOMBRES_TIENDAS)
-            prod_v = st.text_input("Producto vendido").upper()
-            talla_v = st.selectbox("Talla", TALLAS)
-            cant_v = st.number_input("Cantidad vendida", min_value=1)
-            if st.form_submit_button("Registrar Venta"):
-                c.execute('INSERT INTO ventas_tiendas (tienda, producto, talla, cantidad, fecha) VALUES (?,?,?,?,?)',
-                          (tienda_vende, prod_v, talla_v, cant_v, datetime.now().date()))
+    # 1. INGRESO (ADMIN)
+    if choice == "📥 Ingreso Almacén":
+        st.subheader("Registrar Mercadería Nueva")
+        with st.form("ingreso"):
+            p = st.text_input("Producto").upper()
+            t = st.selectbox("Talla", TALLAS)
+            c_in = st.number_input("Cantidad", min_value=1)
+            if st.form_submit_button("Guardar"):
+                c.execute('INSERT INTO ingresos (producto, talla, cantidad, fecha) VALUES (?,?,?,?)', (p, t, c_in, datetime.now().date()))
                 conn.commit()
-                st.success("Venta registrada y descontada del reporte.")
+                st.success("Guardado correctamente")
 
-    elif choice == "📝 Hacer Pedido al Almacén":
-        st.header("📝 Solicitar Mercadería")
-        with st.form("pedido"):
-            t_ped = st.selectbox("Tienda", NOMBRES_TIENDAS)
-            msg = st.text_area("Listado de lo que falta")
-            img = st.file_uploader("Subir foto de la lista", type=['jpg', 'png'])
-            if st.form_submit_button("Enviar al Almacén Central"):
-                img_bytes = img.read() if img else None
-                c.execute('INSERT INTO pedidos (tienda, pedido_texto, foto, fecha) VALUES (?,?,?,?)',
-                          (t_ped, msg, img_bytes, datetime.now()))
-                conn.commit()
-                st.success("¡Pedido enviado con éxito!")
+    # 2. ENVÍO (ADMIN)
+    elif choice == "🚚 Envío a Tiendas":
+        df_s = obtener_stock_total()
+        if not df_s.empty:
+            with st.form("envio"):
+                p_sel = st.selectbox("Producto", df_s['producto'].unique())
+                t_sel = st.selectbox("Talla", TALLAS)
+                tienda = st.selectbox("Destino", NOMBRES_TIENDAS)
+                cant = st.number_input("Cantidad", min_value=1)
+                if st.form_submit_button("Confirmar Envío"):
+                    c.execute('INSERT INTO distribucion (producto, talla, cantidad, tienda, fecha) VALUES (?,?,?,?,?)', (p_sel, t_sel, cant, tienda, datetime.now().date()))
+                    conn.commit()
+                    st.success("Enviado")
+        else:
+            st.warning("No hay stock disponible.")
 
-    # --- LÓGICA DE ADMINISTRADOR (CONTROL TOTAL) ---
-    elif choice == "📊 Dashboard Global":
-        st.header("📊 Resumen General")
-        # Aquí se mostraría el inventario total menos lo que las tiendas vendieron
-        st.write("Aquí verás el stock central y lo que cada tienda ha vendido.")
-        df_v = pd.read_sql('SELECT * FROM ventas_tiendas', conn)
-        st.subheader("Ventas Recientes por Tienda")
-        st.dataframe(df_v)
-
-    elif choice == "📝 Ver Pedidos Recibidos":
-        st.header("📦 Pedidos de las Tiendas")
+    # 3. PEDIDOS (ADMIN)
+    elif choice == "📦 Pedidos Recibidos":
         pedidos = pd.read_sql('SELECT * FROM pedidos ORDER BY fecha DESC', conn)
         for i, r in pedidos.iterrows():
-            with st.expander(f"Pedido de {r['tienda']} - {r['fecha']}"):
+            with st.expander(f"De: {r['tienda']} - {r['fecha']}"):
                 st.write(r['pedido_texto'])
                 if r['foto']: st.image(r['foto'], width=300)
-                if st.button(f"Atendido #{r['id']}"):
+                if st.button(f"Eliminar {r['id']}"):
                     c.execute('DELETE FROM pedidos WHERE id=?', (r['id'],))
                     conn.commit()
                     st.rerun()
 
-    # Opción para cerrar sesión
     if st.sidebar.button("Cerrar Sesión"):
         st.session_state['rol'] = None
         st.rerun()
