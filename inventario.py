@@ -3,197 +3,122 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 
-# =========================================================
-# 1. CONFIGURACIÓN INICIAL Y ESTILOS
-# =========================================================
-st.set_page_config(
-    page_title="Sistema KS - Control Maestro",
-    page_icon="🧥",
-    layout="wide"
-)
-
-# Definición de constantes para evitar errores de escritura
+# --- CONFIGURACIÓN ---
 NOMBRES_TIENDAS = ["Tienda Central", "Tienda Norte", "Tienda Sur", "Tienda Este", "Tienda Oeste"]
 TALLAS = ["S", "M", "L", "XL"]
 
-# =========================================================
-# 2. CONEXIÓN A GOOGLE SHEETS (BASE DE DATOS ETERNA)
-# =========================================================
-# Esta conexión permite que los datos NO SE BORREN al cerrar la web
+# --- CONEXIÓN PERMANENTE ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def leer_datos(pestaña):
-    """Lee datos en tiempo real de Google Sheets."""
     try:
-        # ttl=0 asegura que siempre lea lo más nuevo, no lo guardado en memoria
-        return conn.read(worksheet=pestaña, ttl=0)
-    except Exception:
-        # Si la pestaña no existe aún, devuelve un DataFrame vacío con columnas
-        if pestaña == "Ingresos":
-            return pd.DataFrame(columns=['producto', 'talla', 'cantidad', 'fecha'])
-        if pestaña == "Distribucion":
-            return pd.DataFrame(columns=['producto', 'talla', 'cantidad', 'tienda', 'fecha'])
-        if pestaña == "Ventas":
-            return pd.DataFrame(columns=['tienda', 'producto', 'talla', 'cantidad', 'fecha'])
-        if pestaña == "Pedidos":
-            return pd.DataFrame(columns=['tienda', 'pedido', 'fecha'])
+        return conn.read(worksheet=pestaña, ttl="0")
+    except:
         return pd.DataFrame()
 
-# =========================================================
-# 3. LÓGICA MATEMÁTICA (RESTA DE STOCK)
-# =========================================================
+# --- CÁLCULO DE STOCK ---
 def obtener_stock_real():
-    """Calcula el stock disponible: Ingresos menos lo enviado a tiendas."""
     df_in = leer_datos("Ingresos")
     df_out = leer_datos("Distribucion")
-    
     if df_in.empty:
         return pd.DataFrame(columns=['producto', 'talla', 'stock_disponible'])
-    
-    # Agrupar ingresos por producto y talla
     res_in = df_in.groupby(['producto', 'talla'])['cantidad'].sum().reset_index()
-    
-    # Agrupar salidas por producto y talla
-    if not df_out.empty:
-        res_out = df_out.groupby(['producto', 'talla'])['cantidad'].sum().reset_index()
-    else:
-        res_out = pd.DataFrame(columns=['producto', 'talla', 'cantidad'])
-    
-    # Unir tablas y calcular resta
-    df_merge = pd.merge(res_in, res_out, on=['producto', 'talla'], how='left', suffixes=('_in', '_out')).fillna(0)
-    df_merge['stock_disponible'] = df_merge['cantidad_in'] - df_merge['cantidad_out']
-    
-    return df_merge[df_merge['stock_disponible'] > 0]
+    res_out = df_out.groupby(['producto', 'talla'])['cantidad'].sum().reset_index() if not df_out.empty else pd.DataFrame(columns=['producto', 'talla', 'cantidad'])
+    df = pd.merge(res_in, res_out, on=['producto', 'talla'], how='left', suffixes=('_in', '_out')).fillna(0)
+    df['stock_disponible'] = df['cantidad_in'] - df['cantidad_out']
+    return df[df['stock_disponible'] > 0]
 
-# =========================================================
-# 4. CONTROL DE ACCESO (LOGIN POR PIN)
-# =========================================================
+# --- INTERFAZ ---
+st.set_page_config(page_title="Sistema KS - Control Total", layout="wide")
+
 if 'rol' not in st.session_state:
     st.session_state['rol'] = None
 
 if st.session_state['rol'] is None:
-    st.title("🛡️ Acceso de Seguridad - Sistema KS")
-    st.markdown("---")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        pin = st.text_input("Ingrese su PIN para continuar", type="password")
-        if st.button("🔓 Entrar al Sistema"):
-            if pin == "2026":
-                st.session_state['rol'] = "admin"
-                st.rerun()
-            elif pin == "1234":
-                st.session_state['rol'] = "tienda"
-                st.rerun()
-            else:
-                st.error("❌ PIN incorrecto. Acceso denegado.")
-else:
-    # =========================================================
-    # 5. MENÚ LATERAL Y NAVEGACIÓN
-    # =========================================================
-    st.sidebar.title("MENU PRINCIPAL")
-    
-    if st.session_state['rol'] == "admin":
-        st.sidebar.success("✅ MODO: ADMINISTRADOR")
-        menu = [
-            "📊 Inventario Real", 
-            "📥 Registrar Ingreso Almacén", 
-            "🚚 Enviar Mercadería a Sucursal", 
-            "📈 Reporte de Ventas Global", 
-            "📦 Revisar Pedidos de Tiendas"
-        ]
-    else:
-        st.sidebar.info("🏪 MODO: TIENDA")
-        menu = [
-            "🛒 Registrar Venta Diaria", 
-            "📜 Historial de Ventas (Editar)", 
-            "📝 Solicitar Pedido al Jefe"
-        ]
-    
-    choice = st.sidebar.selectbox("Seleccione una operación:", menu)
-    st.sidebar.markdown("---")
-
-    # ---------------------------------------------------------
-    # SECCIÓN ADMIN: INVENTARIO
-    # ---------------------------------------------------------
-    if choice == "📊 Inventario Real":
-        st.header("📊 Stock Disponible en Almacén Central")
-        df_stock = obtener_stock_real()
-        if not df_stock.empty:
-            st.dataframe(df_stock, use_container_width=True)
-            # Gráfico rápido de stock
-            st.bar_chart(data=df_stock, x="producto", y="stock_disponible")
+    st.title("🔐 Acceso al Sistema KS")
+    pin = st.text_input("Introduce tu PIN", type="password")
+    if st.button("Ingresar"):
+        if pin == "2026":
+            st.session_state['rol'] = "admin"; st.rerun()
+        elif pin == "1234":
+            st.session_state['rol'] = "tienda"; st.rerun()
         else:
-            st.info("No hay productos registrados en el inventario.")
+            st.error("PIN Incorrecto")
+else:
+    if st.session_state['rol'] == "admin":
+        st.sidebar.success("💻 MODO ADMINISTRADOR")
+        menu = ["📊 Inventario Central", "📥 Ingreso Almacén", "🚚 Enviar a Tiendas", "📈 Ventas Globales", "📦 Pedidos Recibidos"]
+    else:
+        st.sidebar.info("🏪 MODO TIENDA")
+        menu = ["🛒 Registrar Venta", "📜 Historial y Editar", "📝 Hacer Pedido"]
+    
+    choice = st.sidebar.selectbox("Seleccione opción:", menu)
 
-    # ---------------------------------------------------------
-    # SECCIÓN ADMIN: REGISTRAR INGRESO
-    # ---------------------------------------------------------
-    elif choice == "📥 Registrar Ingreso Almacén":
-        st.header("📥 Entrada de Nueva Mercadería")
-        with st.form("form_ingreso", clear_on_submit=True):
-            col_a, col_b = st.columns(2)
-            with col_a:
-                prod = st.text_input("Nombre del Producto (Ej: HOODIE GOTHIC)").upper()
-                talla = st.selectbox("Talla", TALLAS)
-            with col_b:
-                cant = st.number_input("Cantidad de unidades", min_value=1, step=1)
-                fecha = st.date_input("Fecha de ingreso", datetime.now())
-            
-            if st.form_submit_button("Guardar en Google Sheets"):
-                df_actual = leer_datos("Ingresos")
-                nueva_fila = pd.DataFrame([[prod, talla, cant, str(fecha)]], 
-                                         columns=['producto', 'talla', 'cantidad', 'fecha'])
-                df_final = pd.concat([df_actual, nueva_fila], ignore_index=True)
-                conn.update(worksheet="Ingresos", data=df_final)
-                st.success(f"✅ ¡{prod} registrado con éxito en la nube!")
+    # --- TIENDA ---
+    if choice == "🛒 Registrar Venta":
+        st.header("🛒 Registrar Venta Diaria")
+        with st.form("form_venta", clear_on_submit=True):
+            tienda_v = st.selectbox("Tu Tienda", NOMBRES_TIENDAS)
+            prod_v = st.text_input("Producto").upper()
+            talla_v = st.selectbox("Talla", TALLAS)
+            cant_v = st.number_input("Cantidad", min_value=1, step=1)
+            if st.form_submit_button("Confirmar Venta"):
+                df_v = leer_datos("Ventas")
+                nueva_v = pd.DataFrame([[tienda_v, prod_v, talla_v, cant_v, datetime.now().strftime("%Y-%m-%d")]], columns=['tienda', 'producto', 'talla', 'cantidad', 'fecha'])
+                conn.update(worksheet="Ventas", data=pd.concat([df_v, nueva_v], ignore_index=True))
+                st.success("✅ Venta guardada")
 
-    # ---------------------------------------------------------
-    # SECCIÓN ADMIN: ENVIAR A TIENDAS
-    # ---------------------------------------------------------
-    elif choice == "🚚 Enviar Mercadería a Sucursal":
-        st.header("🚚 Distribución a Tiendas")
+    elif choice == "📜 Historial y Editar":
+        st.header("📜 Historial de Ventas")
+        df_v = leer_datos("Ventas")
+        if not df_v.empty:
+            st.dataframe(df_v, use_container_width=True)
+            st.info("Para editar, borra la fila en tu Google Sheet.")
+
+    elif choice == "📝 Hacer Pedido":
+        st.header("📝 Solicitar Mercadería")
+        with st.form("form_ped", clear_on_submit=True):
+            t_ped = st.selectbox("Tienda", NOMBRES_TIENDAS)
+            txt = st.text_area("Lista de faltantes...")
+            if st.form_submit_button("Enviar Pedido"):
+                df_p = leer_datos("Pedidos")
+                nuevo_p = pd.DataFrame([[t_ped, txt, datetime.now().strftime("%Y-%m-%d %H:%M")]], columns=['tienda', 'pedido', 'fecha'])
+                conn.update(worksheet="Pedidos", data=pd.concat([df_p, nuevo_p], ignore_index=True))
+                st.success("🚀 Pedido enviado")
+
+    # --- ADMIN ---
+    elif choice == "📊 Inventario Central":
+        st.header("📊 Stock Real")
+        st.dataframe(obtener_stock_real(), use_container_width=True)
+
+    elif choice == "📥 Ingreso Almacén":
+        st.header("📥 Entrada de Mercadería")
+        with st.form("form_in", clear_on_submit=True):
+            p = st.text_input("Producto").upper()
+            t = st.selectbox("Talla", TALLAS)
+            c = st.number_input("Cantidad", min_value=1, step=1)
+            if st.form_submit_button("Guardar"):
+                df_in = leer_datos("Ingresos")
+                nuevo_in = pd.DataFrame([[p, t, c, datetime.now().strftime("%Y-%m-%d")]], columns=['producto', 'talla', 'cantidad', 'fecha'])
+                conn.update(worksheet="Ingresos", data=pd.concat([df_in, nuevo_in], ignore_index=True))
+                st.success("📦 Stock actualizado")
+
+    elif choice == "🚚 Enviar a Tiendas":
+        st.header("🚚 Enviar a Sucursales")
         df_inv = obtener_stock_real()
         if not df_inv.empty:
-            with st.form("form_envio", clear_on_submit=True):
-                prod_env = st.selectbox("Seleccionar Producto", df_inv['producto'].unique())
-                talla_env = st.selectbox("Seleccionar Talla", TALLAS)
-                tienda_dest = st.selectbox("Tienda Destino", NOMBRES_TIENDAS)
-                cant_env = st.number_input("Cantidad a enviar", min_value=1)
-                
+            with st.form("form_env", clear_on_submit=True):
+                p_s = st.selectbox("Producto", df_inv['producto'].unique())
+                t_s = st.selectbox("Talla", TALLAS)
+                dest = st.selectbox("Destino", NOMBRES_TIENDAS)
+                cant = st.number_input("Cantidad", min_value=1)
                 if st.form_submit_button("Confirmar Envío"):
-                    df_dist = leer_datos("Distribucion")
-                    envio_nuevo = pd.DataFrame([[prod_env, talla_env, cant_env, tienda_dest, datetime.now().strftime("%Y-%m-%d")]], 
-                                              columns=['producto', 'talla', 'cantidad', 'tienda', 'fecha'])
-                    df_final = pd.concat([df_dist, envio_nuevo], ignore_index=True)
-                    conn.update(worksheet="Distribucion", data=df_final)
-                    st.success(f"🚚 Mercadería enviada a {tienda_dest}")
+                    df_out = leer_datos("Distribucion")
+                    nuevo_out = pd.DataFrame([[p_s, t_s, cant, dest, datetime.now().strftime("%Y-%m-%d")]], columns=['producto', 'talla', 'cantidad', 'tienda', 'fecha'])
+                    conn.update(worksheet="Distribucion", data=pd.concat([df_out, nuevo_out], ignore_index=True))
+                    st.success("🚚 Mercadería enviada")
                     st.rerun()
-        else:
-            st.warning("⚠️ No hay stock disponible para realizar envíos.")
 
-    # ---------------------------------------------------------
-    # SECCIÓN TIENDA: REGISTRAR VENTA
-    # ---------------------------------------------------------
-    elif choice == "🛒 Registrar Venta Diaria":
-        st.header("🛒 Registro de Venta")
-        with st.form("form_v_tienda", clear_on_submit=True):
-            t_origen = st.selectbox("Tu Sucursal", NOMBRES_TIENDAS)
-            p_vendido = st.text_input("Producto Vendido").upper()
-            ta_vendida = st.selectbox("Talla", TALLAS)
-            ca_vendida = st.number_input("Cantidad", min_value=1)
-            
-            if st.form_submit_button("Registrar Venta"):
-                df_v = leer_datos("Ventas")
-                v_nueva = pd.DataFrame([[t_origen, p_vendido, ta_vendida, ca_vendida, datetime.now().strftime("%Y-%m-%d")]], 
-                                      columns=['tienda', 'producto', 'talla', 'cantidad', 'fecha'])
-                df_actualizado = pd.concat([df_v, v_nueva], ignore_index=True)
-                conn.update(worksheet="Ventas", data=df_actualizado)
-                st.success("✅ Venta guardada correctamente.")
-
-    # ---------------------------------------------------------
-    # SECCIÓN TIENDA: HISTORIAL / EDITAR
-    # ---------------------------------------------------------
-    elif choice == "📜 Historial de Ventas (Editar)":
-        st.header("📜 Mis Ventas Registradas")
-        t_hist = st.selectbox("Selecciona tu tienda para filtrar", NOMBRES_TIENDAS)
-        df_ventas = leer_datos("Ventas
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state['rol'] = None
+        st.rerun()
